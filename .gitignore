@@ -64,3 +64,4 @@ test_api.py
 .pytest_cache/
 .coverage
 htmlcov/
+config_lcj.json.local
