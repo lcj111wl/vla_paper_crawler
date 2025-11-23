@@ -2,25 +2,38 @@
 
 一个用于自动抓取 Vision-Language-Action (VLA) 相关论文，并进行多模态大模型评分、写入 Notion 数据库的自动化工具。
 
-## ✨ 功能特性
-- 🔍 多源检索：支持 arXiv 与（可选）Semantic Scholar 增强信息
-- 🧠 多模态评分：调用支持视觉的 LLM（如 qwen-vl-plus / gpt-4o）对论文进行全文 + 图片综合评分
-- 📄 PDF 解析：提取前 N 页全文（可配置）+ 自适应筛选关键图片（过滤小图、按大小排序）
-- 🏷️ 机构信息：可选 enrich（作者所属机构标签）
-- 🧪 评分维度：VLA相关性 / 方法创新性 / 实验严谨性 / 技术深度 / 影响潜力
-- 📊 Notion 集成：自动创建并更新 Recommend Score / Rationale / Institutions 等字段
-- 🛠️ 一键部署：提供 setup.sh、run.sh、test 脚本、配置模板
+[![Code Quality](https://img.shields.io/badge/code%20quality-85%2F100-brightgreen)](https://github.com/lcj111wl/vla_paper_crawler)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-## � 项目结构
+## ✨ 功能特性
+
+### 核心功能
+- 🔍 **多源检索**：支持 arXiv 与 Semantic Scholar，自动去重
+- 🧠 **多模态评分**：调用支持视觉的 LLM（如 qwen-vl-plus / gpt-4o）对论文进行全文 + 图片综合评分
+- 📄 **PDF 智能解析**：提取前 N 页全文（可配置）+ 自适应筛选关键图片（过滤小图、按大小排序）
+- 🏷️ **机构信息提取**：自动获取作者所属机构（学校/企业）
+- 🧪 **评分维度**：VLA相关性 / 方法创新性 / 实验严谨性 / 技术深度 / 影响潜力
+- 📊 **Notion 深度集成**：自动创建并更新 Recommend Score / Rationale / Institutions 等字段
+
+### 智能优化
+- ⚡ **提前去重**：在 LLM 评分前过滤重复论文，节省 token 成本
+- 🔧 **缺失字段补全**：自动检测并补全已有论文的缺失字段（PDF Link / Institutions / Citations / Recommend Score）
+- 📈 **优先级补全**：智能区分免费 API 和付费 LLM，按优先级补全
+- 🛠️ **一键部署**：提供 setup.sh、run.sh、test 脚本、配置模板
+
+## 📁 项目结构
 ```
-├── paper_crawler.py          # 主程序：抓取 + 解析 + 评分 + Notion 同步
-├── config.template.json      # 配置模板（使用环境变量注入）
-├── config_lcj.json           # 私有运行配置（勿提交）
-├── requirements.txt          # 依赖列表
+├── paper_crawler.py          # 主程序：抓取 + 解析 + 评分 + Notion 同步 + 补全
+├── vla_filter.py             # VLA 论文过滤模块（公用）NEW!
+├── figure_extractor.py       # 框架图提取工具
+├── notion_sync_tasks.py      # Notion 任务同步（独立工具）
+├── config.template.json      # 配置模板（占位符，无敏感信息）
+├── config_lcj.json           # 私有运行配置（勿提交，.gitignore 已忽略）
+├── requirements.txt          # Python 依赖列表
+├── README.md                 # 项目说明文档
 ├── README_DEPLOY.md          # 部署与运维文档
 ├── QUICKSTART.md             # 快速开始指南
 ├── MULTIMODAL_README.md      # 多模态评分与 PDF 解析说明
-├── CHANGELOG_MULTIMODAL.md   # 多模态增强更新日志
 ├── test_multimodal.sh        # 测试多模态 1 篇论文脚本
 ├── test_5papers.sh           # 测试 5 篇论文脚本
 ├── run.sh                    # 运行脚本（生产）
