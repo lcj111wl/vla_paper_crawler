@@ -342,7 +342,3 @@ class FigureExtractor:
         else:
             logger.warning("[DEBUG] ❌ 添加图片到Notion页面失败")
             return None
-        
-        # 返回第一张图片URL（用于Framework Diagram字段）
-        logger.info(f"[DEBUG] 返回Framework Diagram URL: {figure_urls[0][:80]}")
-        return figure_urls[0]

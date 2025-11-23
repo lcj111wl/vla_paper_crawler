@@ -48,6 +48,8 @@ test_multimodal_output.log
 *.tmp
 *.temp
 *.bak
+TMP_*.txt
+preview_images.html
 
 # macOS
 .DS_Store
@@ -65,3 +67,6 @@ test_api.py
 .coverage
 htmlcov/
 config_lcj.json.local
+
+# 运行时状态文件
+status.json

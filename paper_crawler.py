@@ -17,6 +17,9 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 
+# VLA 过滤模块
+from vla_filter import is_vla_related
+
 # PDF 解析
 try:
     import fitz  # PyMuPDF
@@ -44,6 +47,308 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+# ===================== 缺失字段补全辅助函数 =====================
+
+def _derive_pdf_link(paper: Dict[str, Any]) -> Optional[str]:
+    """从 DOI 或 URL 推导 PDF 链接
+
+    Args:
+        paper: 论文数据字典
+
+    Returns:
+        PDF 链接或 None
+    """
+    # 如果已有 PDF Link，返回 None
+    if paper.get('pdf_url'):
+        return None
+
+    # 1. 尝试从 arXiv ID 构建
+    doi = paper.get('doi', '')
+    if doi.lower().startswith('arxiv:'):
+        arxiv_id = doi.split(':', 1)[1]
+        return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+
+    # 2. 从 URL 推导（如果是 arxiv 网址）
+    url = paper.get('url', '')
+    if 'arxiv.org' in url:
+        if '/abs/' in url:
+            arxiv_id = url.split('/abs/')[-1].split('v')[0]  # 移除版本号
+            return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+        elif '/pdf/' in url:
+            return url  # 已经是 PDF 链接
+
+    return None
+
+
+def _fetch_institutions_from_semantic_scholar(paper: Dict[str, Any],
+                                               ss_api_base: str = "https://api.semanticscholar.org/graph/v1") -> List[str]:
+    """从 Semantic Scholar 查询作者机构（发表论文的学校/企业等）
+
+    Args:
+        paper: 论文数据字典
+        ss_api_base: Semantic Scholar API 基础 URL
+
+    Returns:
+        机构名称列表（如 MIT, Stanford, Google DeepMind 等）
+    """
+    institutions = []
+
+    try:
+        # 优先级1: 通过 DOI 查询（最准确）
+        doi = paper.get('doi', '')
+        paper_id = None
+
+        if doi and doi.startswith('10.'):
+            paper_id = f"DOI:{doi}"
+            logger.debug(f"使用 DOI 查询机构: {paper_id}")
+        elif doi and doi.lower().startswith('arxiv:'):
+            arxiv_id = doi.split(':', 1)[1]
+            paper_id = f"arXiv:{arxiv_id}"
+            logger.debug(f"使用 arXiv ID 查询机构: {paper_id}")
+
+        # 优先级2: 通过 URL 提取 DOI/arXiv
+        if not paper_id:
+            url = paper.get('url', '')
+            if 'arxiv.org' in url:
+                if '/abs/' in url:
+                    arxiv_id = url.split('/abs/')[-1].split('v')[0]
+                    paper_id = f"arXiv:{arxiv_id}"
+                    logger.debug(f"从 URL 提取 arXiv ID: {paper_id}")
+            elif 'doi.org' in url:
+                import re
+                match = re.search(r'doi\.org/(10\.\S+)', url)
+                if match:
+                    paper_id = f"DOI:{match.group(1)}"
+                    logger.debug(f"从 URL 提取 DOI: {paper_id}")
+
+        # 优先级3: 通过标题搜索（最不准确）
+        if not paper_id:
+            title = paper.get('title')
+            if not title:
+                logger.warning(f"论文缺少 DOI 和标题，无法查询机构")
+                return institutions
+
+            logger.debug(f"使用标题搜索机构: {title[:50]}...")
+            search_url = f"{ss_api_base}/paper/search"
+            params = {"query": title, "limit": 1, "fields": "paperId"}
+            response = requests.get(search_url, params=params, timeout=20)
+
+            if response.status_code == 429:
+                logger.warning("Semantic Scholar API 限流，跳过机构查询")
+                return institutions
+
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get('data'):
+                paper_id = data['data'][0].get('paperId')
+                logger.debug(f"搜索到论文 ID: {paper_id}")
+            else:
+                logger.warning(f"未找到论文: {title[:50]}")
+                return institutions
+
+        # 查询论文详情（包含作者及其机构）
+        paper_url = f"{ss_api_base}/paper/{paper_id}"
+        params = {"fields": "authors.affiliations,authors.name"}
+
+        response = requests.get(paper_url, params=params, timeout=20)
+
+        if response.status_code == 429:
+            logger.warning("Semantic Scholar API 限流")
+            return institutions
+
+        if response.status_code == 404:
+            logger.warning(f"论文不存在: {paper_id}")
+            return institutions
+
+        response.raise_for_status()
+        paper_data = response.json()
+
+        # 提取作者机构
+        authors = paper_data.get('authors', [])
+        logger.info(f"📚 论文有 {len(authors)} 位作者")
+
+        for idx, author in enumerate(authors[:15]):  # 限制前 15 位作者
+            author_name = author.get('name', 'Unknown')
+            affiliations = author.get('affiliations', [])
+
+            if not affiliations:
+                logger.debug(f"  作者 {idx+1}/{len(authors)}: {author_name} - 无机构信息")
+                continue
+
+            logger.debug(f"  作者 {idx+1}/{len(authors)}: {author_name} - {len(affiliations)} 个机构")
+
+            for aff in affiliations:
+                # affiliations 可能是字符串或字典
+                if isinstance(aff, str):
+                    name = aff
+                elif isinstance(aff, dict):
+                    name = aff.get('name') or aff.get('displayName')
+                else:
+                    continue
+
+                if name and name not in institutions:
+                    institutions.append(name)
+                    logger.debug(f"    ✓ 添加机构: {name}")
+
+                if len(institutions) >= 15:
+                    break
+
+            if len(institutions) >= 15:
+                break
+
+        if institutions:
+            logger.info(f"✅ 找到 {len(institutions)} 个机构: {', '.join(institutions[:3])}...")
+        else:
+            logger.warning(f"⚠️  未找到任何机构信息")
+
+    except Exception as e:
+        logger.error(f"❌ Semantic Scholar 机构查询失败: {e}")
+
+    return institutions
+
+
+def detect_missing_fields(papers: List[Dict[str, Any]],
+                         check_fields: Optional[List[str]] = None) -> Dict[str, List[Dict]]:
+    """检测论文的缺失字段
+
+    Args:
+        papers: 论文列表（来自 fetch_existing_papers）
+        check_fields: 要检查的字段列表
+
+    Returns:
+        {
+            'missing_pdf_url': [{'page_id': '...', 'title': '...', ...}, ...],
+            'missing_institutions': [...],
+            ...
+        }
+    """
+    if check_fields is None:
+        check_fields = ['pdf_url', 'doi', 'institutions', 'citations', 'recommend_score', 'recommend_rationale']
+
+    missing = {f'missing_{field}': [] for field in check_fields}
+
+    for paper in papers:
+        if not paper.get('page_id'):
+            continue
+
+        for field in check_fields:
+            value = paper.get(field)
+            is_missing = False
+
+            # 缺失的定义
+            if value is None:
+                is_missing = True
+            elif isinstance(value, str) and not value.strip():
+                is_missing = True
+            elif isinstance(value, list) and len(value) == 0:
+                is_missing = True
+            # 注意：0 对于数字字段不算缺失
+
+            if is_missing:
+                missing[f'missing_{field}'].append({
+                    'page_id': paper['page_id'],
+                    'title': paper.get('title', 'Unknown'),
+                    'doi': paper.get('doi'),
+                    'url': paper.get('url'),
+                    'pdf_url': paper.get('pdf_url'),
+                    'year': paper.get('year'),
+                    'authors': paper.get('authors'),
+                    'abstract': paper.get('abstract'),
+                })
+
+    # 统计
+    stats = {k: len(v) for k, v in missing.items() if v}
+    if stats:
+        logger.info(f"缺失字段统计: {json.dumps(stats, ensure_ascii=False)}")
+
+    return missing
+
+
+def patch_missing_fields(notion_client: "NotionClient",
+                        papers_with_missing: List[Dict],
+                        field_type: str,
+                        enricher: Optional["MetricsEnricher"] = None,
+                        llm_engine: Optional["LLMScoringEngine"] = None,
+                        max_papers: int = 10) -> Tuple[int, int]:
+    """补全指定类型的缺失字段
+
+    Args:
+        notion_client: NotionClient 实例
+        papers_with_missing: 缺失字段的论文列表
+        field_type: 要补全的字段类型
+        enricher: MetricsEnricher 实例（用于 citations/institutions）
+        llm_engine: LLMScoringEngine 实例（用于 recommend_score）
+        max_papers: 最多补全多少篇论文
+
+    Returns:
+        (成功数, 失败数)
+    """
+    success, failed = 0, 0
+    papers_to_process = papers_with_missing[:max_papers]
+
+    for idx, paper in enumerate(papers_to_process):
+        try:
+            updates = {}
+            page_id = paper['page_id']
+
+            # 优先级1: PDF Link（快速，从 arXiv/DOI 构建）
+            if field_type == 'pdf_url':
+                pdf_url = _derive_pdf_link(paper)
+                if pdf_url:
+                    updates['PDF Link'] = {'url': pdf_url}
+                    logger.info(f"✅ 生成 PDF Link: {paper['title'][:40]} → {pdf_url[:60]}")
+
+            # 优先级2: Citations（Semantic Scholar API）
+            elif field_type == 'citations' and enricher:
+                cites, infl_cites = enricher.enrich_semantic_scholar(paper)
+                if cites is not None:
+                    updates['Citations'] = {'number': int(cites)}
+                    if infl_cites is not None:
+                        updates['Influential Citations'] = {'number': int(infl_cites)}
+                    logger.info(f"✅ 添加引用数: {paper['title'][:40]} → {cites} citations")
+
+            # 优先级2+: Institutions（Semantic Scholar API）
+            elif field_type == 'institutions':
+                institutions = _fetch_institutions_from_semantic_scholar(paper)
+                if institutions:
+                    updates['Institutions'] = {
+                        'multi_select': [{'name': inst[:100]} for inst in institutions[:15]]
+                    }
+                    logger.info(f"✅ 添加机构: {paper['title'][:40]} → {len(institutions)} 个机构")
+
+            # 优先级3: Recommend Score（LLM）
+            elif field_type == 'recommend_score' and llm_engine:
+                score, rationale = llm_engine.score_paper(paper)
+                if score is not None:
+                    updates['Recommend Score'] = {'number': float(score)}
+                    if rationale:
+                        updates['Recommend Rationale'] = {
+                            'rich_text': [{'text': {'content': str(rationale)[:2000]}}]
+                        }
+                    logger.info(f"✅ LLM 评分: {paper['title'][:40]} → {score}")
+                    time.sleep(0.5)  # LLM API 延迟
+
+            # 执行更新
+            if updates:
+                if notion_client.update_paper_fields(page_id, updates):
+                    success += 1
+                else:
+                    failed += 1
+
+            time.sleep(0.3)  # Notion API 限流保护
+
+        except Exception as e:
+            logger.error(f"补全字段失败 ({field_type}): {paper.get('title', 'Unknown')[:40]} - {e}")
+            failed += 1
+
+    logger.info(f"📊 {field_type} 补全完成: {success} 成功, {failed} 失败")
+    return success, failed
+
+
+# ===================== Notion API 客户端 =====================
 
 
 class NotionClient:
@@ -134,7 +439,7 @@ class NotionClient:
     def check_duplicate(self, title: Optional[str] = None, doi: Optional[str] = None, url: Optional[str] = None) -> bool:
         """检查论文是否已存在（通过标题/DOI/URL）"""
         filters = []
-        
+
         if title:
             filters.append({
                 "property": "Name",
@@ -150,16 +455,16 @@ class NotionClient:
                 "property": "userDefined:URL",
                 "url": {"equals": url}
             })
-        
+
         if not filters:
             return False
-        
+
         query_body = {
             "filter": {
                 "or": filters
             }
         }
-        
+
         try:
             response = requests.post(
                 f"{self.base_url}/databases/{self.database_id}/query",
@@ -173,17 +478,195 @@ class NotionClient:
         except Exception as e:
             logger.error(f"检查重复时出错: {e}")
             return False
-    
-    def add_paper(self, paper: Dict) -> Optional[str]:
-        """添加论文到 Notion 数据库，返回页面ID或None"""
-        # 检查重复
-        if self.check_duplicate(
-            title=paper.get('title'),
-            doi=paper.get('doi'),
-            url=paper.get('url')
-        ):
-            logger.info(f"论文已存在，跳过: {paper.get('title', 'Unknown')}")
-            return None
+
+    def filter_duplicates(self, papers: List[Dict]) -> List[Dict]:
+        """批量检查并过滤重复论文，在指标增强和LLM评分之前调用以节省成本
+
+        Args:
+            papers: 论文列表
+
+        Returns:
+            去重后的论文列表
+        """
+        unique_papers = []
+        duplicate_count = 0
+
+        for paper in papers:
+            if not self.check_duplicate(
+                title=paper.get('title'),
+                doi=paper.get('doi'),
+                url=paper.get('url')
+            ):
+                unique_papers.append(paper)
+            else:
+                duplicate_count += 1
+                logger.info(f"⊘ 论文已存在，过滤: {paper.get('title', 'Unknown')[:60]}")
+
+        logger.info(f"✅ 过滤完成: {len(unique_papers)} 篇新论文 / {len(papers)} 篇总论文 (过滤 {duplicate_count} 篇重复)")
+        return unique_papers
+
+    def fetch_existing_papers(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """从 Notion 数据库查询已有论文信息
+
+        Args:
+            limit: 每页查询数量（Notion 一次最多返回100条）
+
+        Returns:
+            论文列表，每个论文包含 page_id 和所有关键字段
+        """
+        papers = []
+        has_more = True
+        start_cursor = None
+
+        # 关键字段映射（Notion → Python）
+        field_mapping = {
+            'Name': 'title',
+            'userDefined:URL': 'url',
+            'PDF Link': 'pdf_url',
+            'DOI': 'doi',
+            'Year': 'year',
+            'Citations': 'citations',
+            'Influential Citations': 'influential_citations',
+            'Institutions': 'institutions',
+            'Recommend Score': 'recommend_score',
+            'Recommend Rationale': 'recommend_rationale',
+            'Framework Diagram': 'framework_diagram',
+            'Authors': 'authors',
+            'Abstract': 'abstract',
+        }
+
+        while has_more:
+            try:
+                query_body = {"page_size": min(limit, 100)}
+                if start_cursor:
+                    query_body["start_cursor"] = start_cursor
+
+                response = requests.post(
+                    f"{self.base_url}/databases/{self.database_id}/query",
+                    headers=self.headers,
+                    json=query_body,
+                    timeout=15
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                for page in data.get('results', []):
+                    paper_dict = {'page_id': page['id']}
+                    properties = page.get('properties', {})
+
+                    # 提取字段值
+                    for notion_field, py_field in field_mapping.items():
+                        if notion_field not in properties:
+                            paper_dict[py_field] = None
+                            continue
+
+                        prop = properties[notion_field]
+                        value = None
+
+                        # 根据字段类型解析
+                        prop_type = prop.get('type')
+                        if prop_type == 'title':
+                            value = ''.join([t.get('text', {}).get('content', '')
+                                           for t in prop.get('title', [])])
+                        elif prop_type == 'url':
+                            value = prop.get('url')
+                        elif prop_type == 'rich_text':
+                            value = ''.join([t.get('text', {}).get('content', '')
+                                           for t in prop.get('rich_text', [])])
+                        elif prop_type == 'number':
+                            value = prop.get('number')
+                        elif prop_type == 'multi_select':
+                            value = [opt.get('name') for opt in prop.get('multi_select', [])]
+
+                        paper_dict[py_field] = value
+
+                    papers.append(paper_dict)
+
+                # 分页
+                has_more = data.get('has_more', False)
+                start_cursor = data.get('next_cursor')
+
+                if has_more:
+                    logger.info(f"已查询 {len(papers)} 篇论文（继续翻页）...")
+                    time.sleep(0.3)  # API 限流保护
+
+            except Exception as e:
+                logger.error(f"查询已有论文失败: {e}")
+                break
+
+        logger.info(f"✅ 查询完成，共 {len(papers)} 篇论文")
+        return papers
+
+    def update_paper_fields(self, page_id: str, updates: Dict[str, Any]) -> bool:
+        """更新论文页面的字段（通用PATCH方法）
+
+        Args:
+            page_id: Notion 页面 ID
+            updates: 字段更新字典，格式如：
+                    {
+                        'PDF Link': {'url': 'https://...'},
+                        'Citations': {'number': 100},
+                        'Institutions': {'multi_select': [{'name': 'MIT'}, ...]},
+                    }
+
+        Returns:
+            是否成功
+        """
+        if not updates:
+            return True
+
+        try:
+            response = requests.patch(
+                f"{self.base_url}/pages/{page_id}",
+                headers=self.headers,
+                json={"properties": updates},
+                timeout=15
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"更新页面字段失败 ({page_id[:8]}...): {e}")
+            return False
+
+    def batch_update_papers(self, updates: List[Tuple[str, Dict[str, Any]]],
+                           delay_s: float = 0.3) -> int:
+        """批量更新多个论文页面
+
+        Args:
+            updates: [(page_id, fields_dict), ...]
+            delay_s: 每次请求间的延迟（秒）
+
+        Returns:
+            成功更新的数量
+        """
+        success_count = 0
+        for page_id, fields_dict in updates:
+            if self.update_paper_fields(page_id, fields_dict):
+                success_count += 1
+            time.sleep(delay_s)
+
+        logger.info(f"批量更新完成: {success_count}/{len(updates)} 成功")
+        return success_count
+
+    def add_paper(self, paper: Dict, skip_duplicate_check: bool = False) -> Optional[str]:
+        """添加论文到 Notion 数据库，返回页面ID或None
+
+        Args:
+            paper: 论文数据字典
+            skip_duplicate_check: 如果为True，跳过重复检查（因为已在批量过滤时检查）
+
+        Returns:
+            成功添加时返回页面ID，否则返回None
+        """
+        # 检查重复（如果未提前批量过滤）
+        if not skip_duplicate_check:
+            if self.check_duplicate(
+                title=paper.get('title'),
+                doi=paper.get('doi'),
+                url=paper.get('url')
+            ):
+                logger.info(f"论文已存在，跳过: {paper.get('title', 'Unknown')}")
+                return None
         
         # 构造 Notion 页面属性
         properties = {
@@ -386,42 +869,7 @@ class ArxivCrawler:
     def __init__(self, keywords: List[str], days_back: int = 3):
         self.keywords = keywords
         self.days_back = days_back
-    
-    @staticmethod
-    def is_vla_related(title: str, abstract: str) -> bool:
-        """严格检查论文是否真正与 VLA 相关
-        
-        必须满足以下条件之一：
-        1. 标题或摘要中包含 "Vision-Language-Action"（任意大小写、连字符形式）
-        2. 标题或摘要中同时包含 "VLA" 且明确是 "model" 或 "policy" 或 "robot"
-        3. 标题或摘要中包含完整短语 "vision language action"
-        """
-        text = (title + " " + abstract).lower()
-        
-        # 规则1: 明确包含 Vision-Language-Action（各种形式）
-        vla_full_patterns = [
-            "vision-language-action",
-            "vision language action",
-            "visionlanguageaction"
-        ]
-        if any(pattern in text for pattern in vla_full_patterns):
-            return True
-        
-        # 规则2: 包含 VLA 且明确是模型/策略/机器人相关
-        if " vla " in text or text.startswith("vla ") or text.endswith(" vla"):
-            vla_contexts = [
-                "vla model",
-                "vla policy",
-                "vla agent",
-                "vla robot",
-                "vla framework",
-                "vla architecture"
-            ]
-            if any(ctx in text for ctx in vla_contexts):
-                return True
-        
-        return False
-    
+
     def search(self, max_results: int = 50) -> List[Dict]:
         """搜索最近的论文（支持分页）"""
         papers: List[Dict] = []
@@ -511,7 +959,7 @@ class ArxivCrawler:
                     year = published_date[:4] if published_date and len(published_date) >= 4 else ""
 
                     # 严格过滤
-                    if not self.is_vla_related(title, summary):
+                    if not is_vla_related(title, summary):
                         logger.debug(f"过滤非VLA论文: {title[:60]}")
                         continue
 
@@ -558,64 +1006,6 @@ class SemanticScholarCrawler:
         self.keywords = keywords
         self.days_back = days_back
         self.enrich_institutions = enrich_institutions
-    
-    @staticmethod
-    def is_vla_related(title: str, abstract: str) -> bool:
-        """严格检查论文是否真正与 VLA 相关（与 ArxivCrawler 相同逻辑）"""
-        text = (title + " " + abstract).lower()
-        
-        # 规则1: 明确包含 Vision-Language-Action
-        vla_full_patterns = [
-            "vision-language-action",
-            "vision language action",
-            "visionlanguageaction"
-        ]
-        if any(pattern in text for pattern in vla_full_patterns):
-            return True
-        
-        # 规则2: 包含 VLA 且明确是模型/策略/机器人相关
-        if " vla " in text or text.startswith("vla ") or text.endswith(" vla"):
-            vla_contexts = [
-                "vla model",
-                "vla policy",
-                "vla agent",
-                "vla robot",
-                "vla framework",
-                "vla architecture"
-            ]
-            if any(ctx in text for ctx in vla_contexts):
-                return True
-        
-        return False
-    
-    def _fetch_author_affiliations(self, author_id: Optional[str]) -> List[str]:
-        """根据作者ID请求其机构信息。出现错误或限流时返回空列表。"""
-        if not author_id:
-            return []
-        url = f"https://api.semanticscholar.org/graph/v1/author/{author_id}"
-        params = {"fields": "affiliations"}
-        try:
-            r = requests.get(url, params=params, timeout=20)
-            if r.status_code == 429:
-                logger.warning("作者机构查询限流(429)，停止后续机构 enrichment")
-                self.enrich_institutions = False
-                return []
-            r.raise_for_status()
-            data = r.json() or {}
-            affs = data.get('affiliations') or []
-            names = []
-            for aff in affs:
-                # affiliation 结构可能包含 name 字段
-                if isinstance(aff, dict):
-                    n = aff.get('name') or aff.get('display_name')
-                    if n:
-                        names.append(n)
-                elif isinstance(aff, str):
-                    names.append(aff)
-            return names
-        except Exception as e:
-            logger.debug("获取作者机构失败: %s", e)
-            return []
 
     def search(self, max_results: int = 30) -> List[Dict]:
         """搜索最近的论文"""
@@ -627,7 +1017,7 @@ class SemanticScholarCrawler:
         params = {
             "query": query,
             "limit": max_results,
-            "fields": "title,authors,year,abstract,url,openAccessPdf,externalIds,venue,publicationDate",
+            "fields": "title,authors.name,authors.affiliations,year,abstract,url,openAccessPdf,externalIds,venue,publicationDate",
             "publicationDateOrYear": f"{cutoff_date}:"
         }
         
@@ -648,9 +1038,9 @@ class SemanticScholarCrawler:
             for item in data.get('data', []):
                 title = item.get('title', 'Untitled')
                 abstract = item.get('abstract', '')
-                
+
                 # 严格过滤：只保留真正的 VLA 论文
-                if not self.is_vla_related(title, abstract):
+                if not is_vla_related(title, abstract):
                     logger.debug(f"过滤非VLA论文: {title[:60]}")
                     continue
                 
@@ -684,17 +1074,30 @@ class SemanticScholarCrawler:
                 else:
                     published_date = ""
                 
-                # 机构提取（可选，仅Semantic Scholar）
+                # 机构提取（直接从返回数据中获取，无需额外 API 调用）
                 institutions: List[str] = []
                 if self.enrich_institutions:
-                    for a in authors_list[:20]:  # 防止过多请求，限制前20个作者
-                        aid = a.get('authorId') or a.get('id')  # Graph API 通常提供 authorId
-                        insts = self._fetch_author_affiliations(aid)
-                        for inst in insts:
-                            if inst and inst not in institutions:
-                                institutions.append(inst)
-                        if len(institutions) >= 25:  # 安全上限
+                    for a in authors_list[:20]:  # 限制前 20 个作者
+                        # 直接从搜索结果中获取机构信息（authors.affiliations 已在 fields 中请求）
+                        affs = a.get('affiliations', []) or []
+                        for aff in affs:
+                            # affiliation 可能是字符串或字典
+                            if isinstance(aff, str):
+                                name = aff
+                            elif isinstance(aff, dict):
+                                name = aff.get('name') or aff.get('displayName')
+                            else:
+                                continue
+
+                            if name and name not in institutions:
+                                institutions.append(name)
+                                logger.debug(f"  ✓ 添加机构: {name}")
+
+                        if len(institutions) >= 15:  # 安全上限
                             break
+
+                    if institutions:
+                        logger.info(f"✅ 从 {len(authors_list)} 位作者中提取到 {len(institutions)} 个机构")
 
                 paper = {
                     'title': title,
@@ -703,7 +1106,7 @@ class SemanticScholarCrawler:
                     'abstract': abstract[:2000],
                     'url': item.get('url', ''),
                     'pdf_url': pdf_url,
-                    'doi': doi,
+                    'doi': doi_field,  # 修复：使用 doi_field 而不是 doi
                     'venue': item.get('venue', 'Conference'),
                     'tags': ['VLA', 'Semantic Scholar'],
                     'published_date': published_date,  # 保存发布时间用于排序
@@ -1289,8 +1692,14 @@ def main():
     
     # 按发布时间排序（最新的在前）
     all_papers.sort(key=lambda p: p.get('published_date', ''), reverse=True)
-    
+
     logger.info(f"总共找到 {len(all_papers)} 篇论文（已按发布时间排序）")
+
+    # 【优化】提前过滤重复论文，避免浪费 API 调用和 LLM token
+    logger.info("=" * 60)
+    logger.info("开始过滤已存在的论文...")
+    logger.info("=" * 60)
+    all_papers = notion.filter_duplicates(all_papers)
 
     # 指标增强（可选）
     enrich_citations = config.get('enrich_citations', True)
@@ -1399,8 +1808,9 @@ def main():
         if added_count >= max_papers_to_add:
             logger.info(f"✅ 已添加 {max_papers_to_add} 篇论文，达到配置的上限")
             break
-        
-        page_id = notion.add_paper(paper)
+
+        # 由于已在前面批量过滤重复，此处跳过重复检查以提高性能
+        page_id = notion.add_paper(paper, skip_duplicate_check=True)
         if page_id:
             added_count += 1
             
@@ -1430,7 +1840,87 @@ def main():
                     logger.warning(f"图片提取失败（跳过）: {e}")
         
         time.sleep(0.5)  # 避免 API 限流
-    
+
+    # 【新增】补全已有论文的缺失字段
+    patch_config = config.get('patch_config', {})
+    if patch_config.get('enabled', False):
+        logger.info("=" * 60)
+        logger.info("开始补全已有论文的缺失字段...")
+        logger.info("=" * 60)
+
+        # 1. 查询已有论文
+        max_scan = patch_config.get('max_papers_to_scan', 200)
+        existing_papers = notion.fetch_existing_papers(limit=max_scan)
+
+        if not existing_papers:
+            logger.info("未找到已有论文，跳过补全")
+        else:
+            # 2. 检测缺失字段
+            fields_to_check = patch_config.get('fields_to_patch', [
+                'pdf_url', 'institutions', 'citations', 'recommend_score'
+            ])
+            missing_by_field = detect_missing_fields(existing_papers, fields_to_check)
+
+            # 3. 初始化增强器（如果需要）
+            enricher = None
+            need_enricher = any([
+                patch_config.get('citations', {}).get('enabled', False),
+                patch_config.get('institutions', {}).get('enabled', False)
+            ])
+            if need_enricher:
+                enricher = MetricsEnricher(
+                    openalex_mailto=config.get('openalex_mailto')
+                )
+
+            # 4. 初始化 LLM（如果需要）
+            llm_engine_for_patch = None
+            if patch_config.get('recommend_score', {}).get('enabled', False):
+                llm_engine_for_patch = LLMScoringEngine(
+                    provider=config.get('llm_provider', 'openai'),
+                    api_key=config.get('llm_api_key') or os.environ.get('OPENAI_API_KEY'),
+                    model=config.get('llm_model', 'gpt-4o-mini'),
+                    api_base=config.get('llm_api_base'),
+                    temperature=float(config.get('llm_temperature', 0.2)),
+                    timeout=int(config.get('llm_timeout', 60)),
+                    max_tokens=int(config.get('llm_max_tokens', 500)),
+                    use_full_pdf=patch_config.get('recommend_score', {}).get('use_full_pdf', False),
+                    pdf_max_pages=int(config.get('llm_pdf_max_pages', 30)),
+                    pdf_max_chars=int(config.get('llm_pdf_max_chars', 50000)),
+                    pdf_extract_images=bool(config.get('llm_pdf_extract_images', True)),
+                    pdf_max_images=int(config.get('llm_pdf_max_images', 10))
+                )
+
+            # 5. 逐字段补全（按优先级）
+            priority_order = ['pdf_url', 'citations', 'institutions', 'recommend_score']
+            total_patched = 0
+
+            for field in priority_order:
+                field_config = patch_config.get(field, {})
+                if not field_config.get('enabled', False):
+                    logger.debug(f"⊘ {field}: 未启用，跳过")
+                    continue
+
+                missing_key = f'missing_{field}'
+                if missing_key not in missing_by_field or not missing_by_field[missing_key]:
+                    logger.info(f"⊘ {field}: 无缺失")
+                    continue
+
+                missing_papers = missing_by_field[missing_key]
+                max_papers = field_config.get('max_papers', 10)
+
+                logger.info(f"🔧 开始补全 {field} ({len(missing_papers)} 篇缺失，限制 {max_papers} 篇)...")
+                success, failed = patch_missing_fields(
+                    notion, missing_papers, field,
+                    enricher=enricher,
+                    llm_engine=llm_engine_for_patch,
+                    max_papers=max_papers
+                )
+                total_patched += success
+
+            logger.info("=" * 60)
+            logger.info(f"✅ 缺失字段补全完成！总补全 {total_patched} 个字段")
+            logger.info("=" * 60)
+
     logger.info("=" * 60)
     logger.info(f"任务完成！成功添加 {added_count} 篇新论文到 Notion")
     if extract_figures and added_count > 0:
