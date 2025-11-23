@@ -102,12 +102,6 @@ python paper_crawler.py config.local.json
 | 5 篇多模态效果验证 | `./test_5papers.sh` | 抓取 5 篇并评分 |
 | 全量运行 | `python paper_crawler.py config.local.json` | 按配置抓取 + 全评分 |
 
-## 📌 后续优化方向
-- 表格/公式结构化提取
-- 架构图智能判定（而非按大小）
-- 本地缓存避免重复下载 PDF
-- LLM 失败自动降级为规则评分
-- CI 自动运行并推送结果
 
 ## 🤝 贡献指南
 欢迎通过 Issue / PR 提交：
