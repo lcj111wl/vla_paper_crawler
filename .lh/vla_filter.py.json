@@ -1,0 +1,18 @@
+{
+    "sourceFile": "vla_filter.py",
+    "activeCommit": 0,
+    "commits": [
+        {
+            "activePatchIndex": 0,
+            "patches": [
+                {
+                    "date": 1777545653843,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n"
+                }
+            ],
+            "date": 1777545653843,
+            "name": "Commit-0",
+            "content": "#!/usr/bin/env python3\n\"\"\"\nVLA 论文过滤模块\n提供通用的 VLA 相关性检查函数\n\"\"\"\n\n\ndef is_vla_related(title: str, abstract: str) -> bool:\n    \"\"\"严格检查论文是否真正与 VLA 相关\n\n    必须满足以下条件之一：\n    1. 标题或摘要中包含 \"Vision-Language-Action\"（任意大小写、连字符形式）\n    2. 标题或摘要中同时包含 \"VLA\" 且明确是 \"model\" 或 \"policy\" 或 \"robot\"\n    3. 标题或摘要中包含完整短语 \"vision language action\"\n\n    Args:\n        title: 论文标题\n        abstract: 论文摘要\n\n    Returns:\n        是否与 VLA 相关\n    \"\"\"\n    text = (title + \" \" + abstract).lower()\n\n    # 规则0: World Action Model (WAM)\n    wam_patterns = [\n        \"world action model\",\n        \"world-action-model\",\n        \"world action baseline\"\n    ]\n    if any(pattern in text for pattern in wam_patterns):\n        return True\n\n    # 规则1: 明确包含 Vision-Language-Action（各种形式）\n    vla_full_patterns = [\n        \"vision-language-action\",\n        \"vision language action\",\n        \"visionlanguageaction\"\n    ]\n    if any(pattern in text for pattern in vla_full_patterns):\n        return True\n\n    # 规则2: 包含 VLA 且明确是模型/策略/机器人相关\n    if \" vla \" in text or text.startswith(\"vla \") or text.endswith(\" vla\"):\n        vla_contexts = [\n            \"vla model\",\n            \"vla policy\",\n            \"vla agent\",\n            \"vla robot\",\n            \"vla framework\",\n            \"vla architecture\"\n        ]\n        if any(ctx in text for ctx in vla_contexts):\n            return True\n\n    return False\n"
+        }
+    ]
+}

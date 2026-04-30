@@ -99,23 +99,14 @@ def _enrich_paper_tags(title: str, abstract: str, source: str) -> List[str]:
     # 关键字匹配规则
     tag_rules = {
         "VLA": ["vision-language-action", "vision language action", "vla model", "vla policy"],
-        "World Action Model": ["world action model", "world-action-model", "world action"],
-        "世界模型": ["world model", "world-model", "predictive model"],
-        "数据集": ["dataset", "benchmark", "corpus", "data collection", "data generation"],
-        "仿真": ["simulation", "simulator", "sim2real", "sim-to-real", "isaac", "mujoco", "robosuite", "habitat", "sapien", "pybullet"],
-        "具身智能": ["embodied ai", "embodied agent", "embodied intelligence"],
-        "机器人": ["robot", "robotics", "humanoid", "quadruped", "manipulator", "mobile robot"],
-        "机器操作(Manipulation)": ["manipulation", "grasping", "pick and place", "pick-and-place", "dexterous manipulation"],
-        "移动与导航(Locomotion/Nav)": ["locomotion", "navigation", "path planning", "slam", "waypoint"],
-        "强化学习": ["reinforcement learning", " rl ", "ppo", "sac", "q-learning", "reward model", "rlhf"],
-        "模仿学习": ["imitation learning", "behavior cloning", "behavioral cloning", " bc ", "demonstration"],
-        "大语言模型": ["llm", "large language model", "gpt-4", "llama", "qwen", "mistral"],
-        "视觉语言模型": ["vlm", "vision-language model", "vision language model", "clip", "siglip", "llava"],
-        "基础模型": ["foundation model"],
-        "扩散模型": ["diffusion model", "diffusion policy", "stable diffusion"],
-        "自动驾驶": ["autonomous driving", "self-driving", "autonomous vehicle", "waymo"],
-        "动作分块": ["action chunking", "action sequence"],
-        "零样本学习": ["zero-shot", "few-shot", "in-context learning"]
+        "World Action Model": ["world action model", "world-action-model"],
+        "世界模型": ["world model"],
+        "数据集": ["dataset", "benchmark", "corpus"],
+        "仿真": ["simulation", "simulator", "sim2real", "sim-to-real", "isaac", "mujoco"],
+        "机器人": ["robot", "manipulation", "locomotion"],
+        "强化学习": ["reinforcement learning", " rl "],
+        "模仿学习": ["imitation learning", "behavior cloning", "behavioral cloning", " bc "],
+        "大模型": ["llm", "large language model", "foundation model", "vlm"],
     }
     
     for tag_name, keywords in tag_rules.items():
@@ -1055,7 +1046,7 @@ class ArxivCrawler:
                         'pdf_url': pdf_url,
                         'doi': f"arXiv:{arxiv_id}",
                         'venue': 'ArXiv',
-                        'tags': _enrich_paper_tags(title, summary, 'arXiv'),
+                        'tags': ['VLA', 'arXiv'],
                         'published_date': published_date,
                     }
                     papers.append(paper)
@@ -1191,7 +1182,7 @@ class SemanticScholarCrawler:
                     'pdf_url': pdf_url,
                     'doi': doi_field,  # 修复：使用 doi_field 而不是 doi
                     'venue': item.get('venue', 'Conference'),
-                    'tags': _enrich_paper_tags(title, abstract, 'Semantic Scholar'),
+                    'tags': ['VLA', 'Semantic Scholar'],
                     'published_date': published_date,  # 保存发布时间用于排序
                     'institutions': institutions,
                 }

@@ -3,7 +3,7 @@
 # 使用绝对路径确保 cron 环境下正常运行
 
 # 设置工作目录和日志目录
-WORK_DIR="/media/lcj/a/Mcp/vla_paper_crawler"
+WORK_DIR="/media/lcj/a1/Mcp/vla_paper_crawler"
 LOG_DIR="${WORK_DIR}/logs"
 DATE_STR=$(date +"%Y-%m-%d")
 TIME_STR=$(date +"%Y-%m-%d %H:%M:%S")

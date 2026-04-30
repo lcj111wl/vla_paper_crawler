@@ -82,56 +82,6 @@ def _derive_pdf_link(paper: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _enrich_paper_tags(title: str, abstract: str, source: str) -> List[str]:
-    """根据标题和摘要自动生成标签清单。
-    
-    Args:
-        title: 论文标题
-        abstract: 论文摘要
-        source: 来源 (如 arXiv, Semantic Scholar)
-        
-    Returns:
-        包含识别到的话题和来源的标签列表
-    """
-    text = (title + " " + abstract).lower()
-    tags = set([source])
-    
-    # 关键字匹配规则
-    tag_rules = {
-        "VLA": ["vision-language-action", "vision language action", "vla model", "vla policy"],
-        "World Action Model": ["world action model", "world-action-model", "world action"],
-        "世界模型": ["world model", "world-model", "predictive model"],
-        "数据集": ["dataset", "benchmark", "corpus", "data collection", "data generation"],
-        "仿真": ["simulation", "simulator", "sim2real", "sim-to-real", "isaac", "mujoco", "robosuite", "habitat", "sapien", "pybullet"],
-        "具身智能": ["embodied ai", "embodied agent", "embodied intelligence"],
-        "机器人": ["robot", "robotics", "humanoid", "quadruped", "manipulator", "mobile robot"],
-        "机器操作(Manipulation)": ["manipulation", "grasping", "pick and place", "pick-and-place", "dexterous manipulation"],
-        "移动与导航(Locomotion/Nav)": ["locomotion", "navigation", "path planning", "slam", "waypoint"],
-        "强化学习": ["reinforcement learning", " rl ", "ppo", "sac", "q-learning", "reward model", "rlhf"],
-        "模仿学习": ["imitation learning", "behavior cloning", "behavioral cloning", " bc ", "demonstration"],
-        "大语言模型": ["llm", "large language model", "gpt-4", "llama", "qwen", "mistral"],
-        "视觉语言模型": ["vlm", "vision-language model", "vision language model", "clip", "siglip", "llava"],
-        "基础模型": ["foundation model"],
-        "扩散模型": ["diffusion model", "diffusion policy", "stable diffusion"],
-        "自动驾驶": ["autonomous driving", "self-driving", "autonomous vehicle", "waymo"],
-        "动作分块": ["action chunking", "action sequence"],
-        "零样本学习": ["zero-shot", "few-shot", "in-context learning"]
-    }
-    
-    for tag_name, keywords in tag_rules.items():
-        if any(kw in text for kw in keywords):
-            tags.add(tag_name)
-            
-    # Default fallback: either VLA or World Action Model if caught by the general filter
-    if "VLA" not in tags and "World Action Model" not in tags:
-        if "world action" in text:
-            tags.add("World Action Model")
-        else:
-            tags.add("VLA")
-            
-    return list(tags)
-
-
 def _fetch_institutions_from_semantic_scholar(paper: Dict[str, Any],
                                                ss_api_base: str = "https://api.semanticscholar.org/graph/v1") -> List[str]:
     """从 Semantic Scholar 查询作者机构（发表论文的学校/企业等）
@@ -344,10 +294,10 @@ def patch_missing_fields(notion_client: "NotionClient",
             updates = {}
             page_id = paper['page_id']
 
+            # 优先级1: PDF Link（快速，从 arXiv/DOI 构建）
             # 防御性 title 处理
             safe_title = (paper.get('title') or 'Unknown')[:40] if isinstance(paper, dict) else 'Unknown'
 
-            # 优先级1: PDF Link（快速，从 arXiv/DOI 构建）
             if field_type == 'pdf_url':
                 pdf_url = _derive_pdf_link(paper)
                 if pdf_url:
@@ -420,22 +370,6 @@ class NotionClient:
         }
         self.base_url = "https://api.notion.com/v1"
         self._db_properties_cache: Optional[Dict[str, Any]] = None
-        self._title_prop_name: Optional[str] = None
-
-    def _get_title_property_name(self) -> str:
-        """获取数据库中 title 类型属性的真实名称（可能为空字符串或其它名称）"""
-        if self._title_prop_name is not None:
-            return self._title_prop_name
-        try:
-            props = self._get_database()
-            for k, v in props.items():
-                if v.get('type') == 'title':
-                    self._title_prop_name = k
-                    return k
-        except Exception:
-            pass
-        self._title_prop_name = "Name"
-        return self._title_prop_name
 
     def _get_database(self) -> Dict[str, Any]:
         if self._db_properties_cache is None:
@@ -514,7 +448,7 @@ class NotionClient:
 
         if title:
             filters.append({
-                "property": self._get_title_property_name(),
+                "property": "Name",
                 "title": {"equals": title}
             })
         if doi:
@@ -592,7 +526,7 @@ class NotionClient:
 
         # 关键字段映射（Notion → Python）
         field_mapping = {
-            self._get_title_property_name(): 'title',
+            'Name': 'title',
             'userDefined:URL': 'url',
             'PDF Link': 'pdf_url',
             'DOI': 'doi',
@@ -741,9 +675,8 @@ class NotionClient:
                 return None
         
         # 构造 Notion 页面属性
-        title_prop = self._get_title_property_name()
         properties = {
-            title_prop: {
+            "Name": {
                 "title": [
                     {
                         "text": {
@@ -790,16 +723,10 @@ class NotionClient:
             }
         
         if paper.get('url'):
-            url_str = paper['url']
-            if url_str and not url_str.startswith('http'): 
-                url_str = 'http://' + url_str
-            properties["userDefined:URL"] = {"url": url_str}
+            properties["userDefined:URL"] = {"url": paper['url']}
         
         if paper.get('pdf_url'):
-            url_str = paper['pdf_url']
-            if url_str and not url_str.startswith('http'): 
-                url_str = 'https://' + url_str
-            properties["PDF Link"] = {"url": url_str}
+            properties["PDF Link"] = {"url": paper['pdf_url']}
         
         if paper.get('doi'):
             properties["DOI"] = {
@@ -870,7 +797,7 @@ class NotionClient:
             logger.info(f"✅ 成功添加论文: {paper.get('title', 'Unknown')}")
             return page_id
         except requests.exceptions.HTTPError as e:
-            err_detail = e.response.text if getattr(e, 'response', None) is not None else str(e)
+            err_detail = e.response.text if e.response else str(e)
             logger.error(f"❌ 添加论文 HTTPError: {paper.get('title', 'Unknown')}, 详情: {err_detail[:500]}")
             return None
         except Exception as e:
@@ -958,7 +885,7 @@ class ArxivCrawler:
         papers: List[Dict] = []
 
         # 构建搜索查询 - 使用严格关键字
-        query = 'all:"Vision-Language-Action" OR all:"VLA model" OR all:"VLA policy" OR all:"vision language action model" OR all:"World Action Model"'
+        query = 'all:"Vision-Language-Action" OR all:"VLA model" OR all:"VLA policy" OR all:"vision language action model"'
 
         # 分页参数
         cutoff_date = datetime.now() - timedelta(days=self.days_back)
@@ -1055,7 +982,7 @@ class ArxivCrawler:
                         'pdf_url': pdf_url,
                         'doi': f"arXiv:{arxiv_id}",
                         'venue': 'ArXiv',
-                        'tags': _enrich_paper_tags(title, summary, 'arXiv'),
+                        'tags': ['VLA', 'arXiv'],
                         'published_date': published_date,
                     }
                     papers.append(paper)
@@ -1191,7 +1118,7 @@ class SemanticScholarCrawler:
                     'pdf_url': pdf_url,
                     'doi': doi_field,  # 修复：使用 doi_field 而不是 doi
                     'venue': item.get('venue', 'Conference'),
-                    'tags': _enrich_paper_tags(title, abstract, 'Semantic Scholar'),
+                    'tags': ['VLA', 'Semantic Scholar'],
                     'published_date': published_date,  # 保存发布时间用于排序
                     'institutions': institutions,
                 }
@@ -1622,7 +1549,7 @@ class LLMScoringEngine:
         
         # 如果有图片，使用多模态格式（OpenAI vision API 格式）
         if pdf_images:
-            user_content: List[Dict[str, Any]] = [
+            user_content = [
                 {
                     "type": "text",
                     "text": f"**论文元数据和全文**:\n{json.dumps(text_content, ensure_ascii=False, indent=2)}\n\n**PDF图片**（共{len(pdf_images)}张，请仔细分析）："
